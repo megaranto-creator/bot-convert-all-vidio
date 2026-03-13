@@ -44,9 +44,9 @@ def cookies_exist() -> bool:
 # === DOWNLOAD ===
 async def download_video(url: str, output_dir: str, quality: str = "best") -> dict:
     format_map = {
-        "best": "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best",
-        "medium": "bestvideo[height<=720][ext=mp4]+bestaudio[ext=m4a]/best[height<=720][ext=mp4]/best[height<=720]",
-        "low": "bestvideo[height<=480][ext=mp4]+bestaudio[ext=m4a]/best[height<=480][ext=mp4]/best[height<=480]",
+        "best": "best[ext=mp4]/best",
+        "medium": "best[height<=720][ext=mp4]/best[height<=720]/best",
+        "low": "best[height<=480][ext=mp4]/best[height<=480]/best",
         "audio": "bestaudio[ext=m4a]/bestaudio",
     }
 
@@ -55,7 +55,7 @@ async def download_video(url: str, output_dir: str, quality: str = "best") -> di
         "outtmpl": os.path.join(output_dir, "%(title).50s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
-        "merge_output_format": "mp4",
+        
         "noplaylist": True,
         "max_filesize": MAX_FILE_SIZE_MB * 1024 * 1024,
     }
@@ -67,11 +67,7 @@ async def download_video(url: str, output_dir: str, quality: str = "best") -> di
         logger.info("⚠️ Tanpa cookies")
 
     if quality == "audio":
-        ydl_opts["postprocessors"] = [{
-            "key": "FFmpegExtractAudio",
-            "preferredcodec": "mp3",
-            "preferredquality": "192",
-        }]
+        ydl_opts["format"] = "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio"
 
     loop = asyncio.get_event_loop()
 
@@ -274,72 +270,3 @@ async def handle_quality_choice(update: Update, context: ContextTypes.DEFAULT_TY
             )
 
             await query.edit_message_text("📤 Mengirim file...")
-
-            if quality == "audio":
-                with open(info["filepath"], "rb") as f:
-                    await context.bot.send_audio(
-                        chat_id=query.message.chat_id,
-                        audio=f,
-                        caption=caption,
-                        parse_mode="Markdown",
-                        title=info["title"][:64],
-                    )
-            else:
-                with open(info["filepath"], "rb") as f:
-                    await context.bot.send_video(
-                        chat_id=query.message.chat_id,
-                        video=f,
-                        caption=caption,
-                        parse_mode="Markdown",
-                        supports_streaming=True,
-                    )
-
-            await query.edit_message_text("✅ Video sudah dikirim di atas!")
-
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e).lower()
-        if "private" in err:
-            msg = (
-                "🔒 *Video Private!*\n\n"
-                "Butuh cookies untuk download.\n"
-                "Kirim /setcookies untuk setup."
-            )
-        elif "unavailable" in err or "removed" in err:
-            msg = "❌ Video tidak tersedia atau sudah dihapus."
-        elif "login" in err or "sign in" in err:
-            msg = (
-                "🔐 *Perlu Login!*\n\n"
-                "Platform ini butuh cookies.\n"
-                "Kirim /setcookies untuk setup."
-            )
-        else:
-            msg = f"❌ Gagal download.\nError: `{str(e)[:200]}`"
-        await query.edit_message_text(msg, parse_mode="Markdown")
-
-    except Exception as e:
-        logger.error(f"Error: {e}", exc_info=True)
-        await query.edit_message_text(
-            f"❌ Terjadi kesalahan:\n`{str(e)[:200]}`",
-            parse_mode="Markdown"
-        )
-
-    finally:
-        context.user_data.clear()
-
-# === MAIN ===
-def main():
-    app = Application.builder().token(BOT_TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("setcookies", set_cookies_command))
-    app.add_handler(CommandHandler("cookiesstatus", cookies_status))
-    app.add_handler(CommandHandler("deletecookies", delete_cookies))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    app.add_handler(CallbackQueryHandler(handle_quality_choice, pattern="^quality_"))
-
-    logger.info("🤖 Bot Video Downloader berjalan...")
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
-
-if __name__ == "__main__":
-    main()
