@@ -3,16 +3,17 @@ import re
 import logging
 import asyncio
 import tempfile
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+import requests
+from telegram import Update, InputMediaPhoto
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    ContextTypes, filters
 )
 import yt_dlp
  
 # === KONFIGURASI ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU_DISINI")
-COOKIES_FILE = "/app/cookies.txt"
+COOKIES_FILE = "/app/data/cookies.txt"
 MAX_FILE_SIZE_MB = 50
  
 logging.basicConfig(
@@ -41,17 +42,13 @@ def is_valid_url(url):
 def cookies_exist():
     return os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0
  
-# === DOWNLOAD ===
-async def download_video(url, output_dir, quality="best"):
-    format_map = {
-        "best": "best[ext=mp4]/best",
-        "medium": "best[height<=720][ext=mp4]/best[height<=720]/best",
-        "low": "best[height<=480][ext=mp4]/best[height<=480]/best",
-        "audio": "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio",
-    }
+def clean_text(text):
+    return text.replace('*','').replace('_','').replace('`','').replace('[','').replace(']','')
  
+# === DOWNLOAD VIDEO ===
+async def download_video(url, output_dir):
     ydl_opts = {
-        "format": format_map.get(quality, format_map["best"]),
+        "format": "best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best",
         "outtmpl": os.path.join(output_dir, "%(title).50s.%(ext)s"),
         "quiet": True,
         "no_warnings": True,
@@ -61,7 +58,6 @@ async def download_video(url, output_dir, quality="best"):
  
     if cookies_exist():
         ydl_opts["cookiefile"] = COOKIES_FILE
-        logger.info("Pakai cookies")
  
     loop = asyncio.get_event_loop()
  
@@ -84,24 +80,83 @@ async def download_video(url, output_dir, quality="best"):
         "title": info.get("title", "Video"),
         "file_size_mb": round(file_size, 2),
         "uploader": info.get("uploader", "Unknown"),
+        "is_image": info.get("ext") in ["jpg", "jpeg", "png", "webp"],
+    }
+ 
+# === CEK APAKAH POSTINGAN FOTO ===
+async def get_media_info(url):
+    ydl_opts = {
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+        "skip_download": True,
+    }
+    if cookies_exist():
+        ydl_opts["cookiefile"] = COOKIES_FILE
+ 
+    loop = asyncio.get_event_loop()
+ 
+    def _get_info():
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            return ydl.extract_info(url, download=False)
+ 
+    return await loop.run_in_executor(None, _get_info)
+ 
+# === DOWNLOAD GAMBAR ===
+async def download_images(url, output_dir):
+    info = await get_media_info(url)
+ 
+    images = []
+    if "entries" in info:
+        for entry in info["entries"]:
+            if entry.get("thumbnails"):
+                best = max(entry["thumbnails"], key=lambda x: x.get("width", 0) * x.get("height", 0))
+                images.append(best.get("url"))
+    elif info.get("thumbnails"):
+        best = max(info["thumbnails"], key=lambda x: x.get("width", 0) * x.get("height", 0))
+        images.append(best.get("url"))
+ 
+    if not images:
+        raise Exception("Tidak ada gambar ditemukan")
+ 
+    downloaded = []
+    for i, img_url in enumerate(images[:10]):
+        try:
+            resp = requests.get(img_url, timeout=15)
+            ext = "jpg"
+            filepath = os.path.join(output_dir, f"image_{i+1}.{ext}")
+            with open(filepath, "wb") as f:
+                f.write(resp.content)
+            downloaded.append(filepath)
+        except Exception as e:
+            logger.warning(f"Gagal download gambar {i+1}: {e}")
+ 
+    if not downloaded:
+        raise Exception("Gagal download semua gambar")
+ 
+    return {
+        "files": downloaded,
+        "title": info.get("title", "Gambar"),
+        "uploader": info.get("uploader", "Unknown"),
+        "count": len(downloaded),
     }
  
 # === COMMANDS ===
 async def start(update, context):
     status = "✅ Aktif" if cookies_exist() else "❌ Belum diset"
     text = (
-        "👋 *Bot Video Downloader*\n\n"
+        "👋 *Bot Media Downloader*\n\n"
         "📥 Platform yang didukung:\n"
-        "• 📸 Instagram\n"
-        "• 🎵 TikTok\n"
+        "• 📸 Instagram (Video & Foto)\n"
+        "• 🎵 TikTok (Video & Foto)\n"
         "• 📘 Facebook\n"
         "• 🎬 YouTube\n"
         "• 🐦 Twitter / X\n\n"
-        f"🍪 Status Cookies: {status}\n\n"
-        "💡 Kirim link video langsung ke sini!\n\n"
+        "⚡ Langsung HD otomatis — tinggal kirim linknya!\n\n"
+        f"🍪 Cookies: {status}\n\n"
         "⚙️ Commands:\n"
         "/start - Pesan ini\n"
-        "/setcookies - Upload cookies (video private)\n"
+        "/setcookies - Upload cookies (konten private)\n"
         "/cookiesstatus - Cek status cookies\n"
         "/deletecookies - Hapus cookies"
     )
@@ -110,15 +165,9 @@ async def start(update, context):
 async def cookies_status(update, context):
     if cookies_exist():
         size = os.path.getsize(COOKIES_FILE)
-        await update.message.reply_text(
-            f"🍪 *Status Cookies*\n\n✅ Aktif\n📦 Ukuran: {size} bytes",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text(f"🍪 Cookies aktif\n📦 Ukuran: {size} bytes")
     else:
-        await update.message.reply_text(
-            "🍪 *Status Cookies*\n\n❌ Belum diset\n\nKirim /setcookies untuk upload.",
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("❌ Cookies belum diset\n\nKirim /setcookies untuk upload.")
  
 async def set_cookies_command(update, context):
     context.user_data["waiting_cookies"] = True
@@ -156,10 +205,11 @@ async def handle_document(update, context):
         os.makedirs(os.path.dirname(COOKIES_FILE), exist_ok=True)
         await file.download_to_drive(COOKIES_FILE)
         context.user_data["waiting_cookies"] = False
-        await msg.edit_text("✅ Cookies berhasil disimpan!\n\nSekarang bisa download video private.", parse_mode="Markdown")
+        await msg.edit_text("✅ Cookies berhasil disimpan!")
     except Exception as e:
-        await msg.edit_text(f"❌ Gagal simpan cookies: {str(e)}", parse_mode="Markdown")
+        await msg.edit_text(f"❌ Gagal simpan cookies: {str(e)}")
  
+# === HANDLER URL UTAMA ===
 async def handle_url(update, context):
     url = update.message.text.strip()
  
@@ -173,108 +223,107 @@ async def handle_url(update, context):
         "youtube": "🎬", "twitter": "🐦", "unknown": "🌐"
     }.get(platform, "🌐")
  
-    context.user_data["pending_url"] = url
- 
-    keyboard = [
-        [
-            InlineKeyboardButton("🔥 Terbaik", callback_data="quality_best"),
-            InlineKeyboardButton("📺 720p", callback_data="quality_medium"),
-        ],
-        [
-            InlineKeyboardButton("📱 480p", callback_data="quality_low"),
-            InlineKeyboardButton("🎵 Audio", callback_data="quality_audio"),
-        ],
-        [InlineKeyboardButton("❌ Batal", callback_data="quality_cancel")],
-    ]
- 
-    await update.message.reply_text(
-        f"{emoji} *{platform.capitalize()}* terdeteksi\n\n🎚️ Pilih kualitas:",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
-    )
- 
-async def handle_quality_choice(update, context):
-    query = update.callback_query
-    await query.answer()
- 
-    if query.data == "quality_cancel":
-        await query.edit_message_text("❌ Download dibatalkan.")
-        context.user_data.clear()
-        return
- 
-    quality = query.data.replace("quality_", "")
-    url = context.user_data.get("pending_url")
- 
-    if not url:
-        await query.edit_message_text("⚠️ Session expired. Kirim ulang linknya ya!")
-        return
- 
-    quality_label = {"best": "Terbaik", "medium": "720p", "low": "480p", "audio": "Audio"}.get(quality, quality)
- 
-    await query.edit_message_text(
-        f"⏳ *Memproses...*\n\n📥 Kualitas: {quality_label}\nMohon tunggu...",
-        parse_mode="Markdown"
-    )
+    msg = await update.message.reply_text(f"{emoji} Mendownload dari {platform.capitalize()}...")
  
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
-            info = await download_video(url, tmpdir, quality)
+            # Coba download sebagai video dulu
+            try:
+                info = await download_video(url, tmpdir)
+                file_size = info["file_size_mb"]
  
-            if info["file_size_mb"] > MAX_FILE_SIZE_MB:
-                await query.edit_message_text(
-                    f"⚠️ File terlalu besar ({info['file_size_mb']}MB).\nCoba kualitas lebih rendah."
-                )
-                return
+                if file_size > MAX_FILE_SIZE_MB:
+                    await msg.edit_text(f"⚠️ File terlalu besar ({file_size}MB). Maks {MAX_FILE_SIZE_MB}MB.")
+                    return
  
-            # Bersihkan karakter khusus dari judul
-            safe_title = info['title'][:80].replace('*','').replace('_','').replace('`','').replace('[','').replace(']','')
-            safe_uploader = info['uploader'].replace('*','').replace('_','').replace('`','')
-            caption = (
-                f"✅ Selesai!\n\n"
-                f"📌 {safe_title}\n"
-                f"👤 {safe_uploader}\n"
-                f"📦 {info['file_size_mb']} MB"
-            )
+                safe_title = clean_text(info["title"][:80])
+                safe_uploader = clean_text(info["uploader"])
+                caption = f"📌 {safe_title}\n👤 {safe_uploader}\n📦 {file_size} MB"
  
-            await query.edit_message_text("📤 Mengirim file...")
+                await msg.edit_text("📤 Mengirim...")
  
-            if quality == "audio":
-                with open(info["filepath"], "rb") as f:
-                    await context.bot.send_audio(
-                        chat_id=query.message.chat_id,
-                        audio=f,
-                        caption=caption,
-                        title=info["title"][:64],
-                    )
-            else:
                 with open(info["filepath"], "rb") as f:
                     await context.bot.send_video(
-                        chat_id=query.message.chat_id,
+                        chat_id=update.message.chat_id,
                         video=f,
                         caption=caption,
                         supports_streaming=True,
                     )
+                await msg.edit_text("✅ Selesai!")
  
-            await query.edit_message_text("✅ Video sudah dikirim di atas!")
+            except yt_dlp.utils.DownloadError as e:
+                err = str(e).lower()
  
-    except yt_dlp.utils.DownloadError as e:
-        err = str(e).lower()
-        if "private" in err:
-            msg = "🔒 *Video Private!*\n\nButuh cookies. Kirim /setcookies"
-        elif "unavailable" in err or "removed" in err:
-            msg = "❌ Video tidak tersedia atau sudah dihapus."
-        elif "login" in err or "sign in" in err:
-            msg = "🔐 *Perlu Login!*\n\nKirim /setcookies untuk setup cookies."
-        else:
-            msg = f"❌ Gagal download.\n`{str(e)[:200]}`"
-        await query.edit_message_text(msg, parse_mode="Markdown")
+                # Kalau bukan video (foto/carousel), coba download gambar
+                if "no video" in err or "image" in err or "photo" in err:
+                    await msg.edit_text("🖼️ Mendownload gambar...")
+                    result = await download_images(url, tmpdir)
+                    safe_title = clean_text(result["title"][:80])
+                    safe_uploader = clean_text(result["uploader"])
+                    caption = f"🖼️ {safe_title}\n👤 {safe_uploader}"
+ 
+                    if len(result["files"]) == 1:
+                        with open(result["files"][0], "rb") as f:
+                            await context.bot.send_photo(
+                                chat_id=update.message.chat_id,
+                                photo=f,
+                                caption=caption,
+                            )
+                    else:
+                        media = []
+                        for i, fp in enumerate(result["files"]):
+                            with open(fp, "rb") as f:
+                                media.append(InputMediaPhoto(
+                                    media=f.read(),
+                                    caption=caption if i == 0 else None
+                                ))
+                        await context.bot.send_media_group(
+                            chat_id=update.message.chat_id,
+                            media=media,
+                        )
+                    await msg.edit_text(f"✅ {result['count']} gambar dikirim!")
+ 
+                elif "private" in err:
+                    await msg.edit_text("🔒 Konten private!\n\nSetup cookies dulu: /setcookies")
+                elif "login" in err or "sign in" in err:
+                    await msg.edit_text("🔐 Perlu login!\n\nSetup cookies: /setcookies")
+                elif "unavailable" in err or "removed" in err:
+                    await msg.edit_text("❌ Konten tidak tersedia atau sudah dihapus.")
+                else:
+                    # Fallback: coba download gambar
+                    try:
+                        await msg.edit_text("🖼️ Mencoba download sebagai gambar...")
+                        result = await download_images(url, tmpdir)
+                        safe_title = clean_text(result["title"][:80])
+                        safe_uploader = clean_text(result["uploader"])
+                        caption = f"🖼️ {safe_title}\n👤 {safe_uploader}"
+ 
+                        if len(result["files"]) == 1:
+                            with open(result["files"][0], "rb") as f:
+                                await context.bot.send_photo(
+                                    chat_id=update.message.chat_id,
+                                    photo=f,
+                                    caption=caption,
+                                )
+                        else:
+                            media = []
+                            for i, fp in enumerate(result["files"]):
+                                with open(fp, "rb") as f:
+                                    media.append(InputMediaPhoto(
+                                        media=f.read(),
+                                        caption=caption if i == 0 else None
+                                    ))
+                            await context.bot.send_media_group(
+                                chat_id=update.message.chat_id,
+                                media=media,
+                            )
+                        await msg.edit_text(f"✅ {result['count']} gambar dikirim!")
+                    except Exception:
+                        await msg.edit_text(f"❌ Gagal download.\n{str(e)[:200]}")
  
     except Exception as e:
         logger.error(f"Error: {e}", exc_info=True)
-        await query.edit_message_text(f"❌ Terjadi kesalahan:\n`{str(e)[:200]}`", parse_mode="Markdown")
- 
-    finally:
-        context.user_data.clear()
+        await msg.edit_text(f"❌ Terjadi kesalahan:\n{str(e)[:200]}")
  
 # === MAIN ===
 def main():
@@ -286,11 +335,9 @@ def main():
     app.add_handler(CommandHandler("deletecookies", delete_cookies))
     app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    app.add_handler(CallbackQueryHandler(handle_quality_choice, pattern="^quality_"))
  
-    logger.info("Bot Video Downloader berjalan...")
+    logger.info("Bot Media Downloader berjalan...")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
  
 if __name__ == "__main__":
     main()
- 
