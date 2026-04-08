@@ -14,7 +14,8 @@ import yt_dlp
 # === KONFIGURASI ===
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ISI_TOKEN_BOT_KAMU_DISINI")
 COOKIES_FILE = "/app/data/cookies.txt"
-MAX_FILE_SIZE_MB = 50
+MAX_FILE_SIZE_MB = 1000
+
  
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -105,41 +106,76 @@ async def get_media_info(url):
 # === DOWNLOAD GAMBAR ===
 async def download_images(url, output_dir):
     info = await get_media_info(url)
- 
+
     images = []
+
+    # Coba ambil gambar dari format (ini yang benar untuk TikTok slideshow)
     if "entries" in info:
         for entry in info["entries"]:
-            if entry.get("thumbnails"):
+            # Cek format gambar dulu
+            formats = entry.get("formats", [])
+            img_formats = [f for f in formats if f.get("ext") in ("jpg", "jpeg", "png", "webp")]
+            if img_formats:
+                best = max(img_formats, key=lambda x: x.get("width", 0) * x.get("height", 0))
+                images.append(best.get("url"))
+            elif entry.get("url"):
+                images.append(entry["url"])
+            # Fallback ke thumbnail kalau tidak ada format lain
+            elif entry.get("thumbnails"):
                 best = max(entry["thumbnails"], key=lambda x: x.get("width", 0) * x.get("height", 0))
                 images.append(best.get("url"))
-    elif info.get("thumbnails"):
-        best = max(info["thumbnails"], key=lambda x: x.get("width", 0) * x.get("height", 0))
-        images.append(best.get("url"))
- 
+    else:
+        # Single post - cek format dulu
+        formats = info.get("formats", [])
+        img_formats = [f for f in formats if f.get("ext") in ("jpg", "jpeg", "png", "webp")]
+        if img_formats:
+            best = max(img_formats, key=lambda x: x.get("width", 0) * x.get("height", 0))
+            images.append(best.get("url"))
+        elif info.get("url"):
+            images.append(info["url"])
+        elif info.get("thumbnails"):
+            best = max(info["thumbnails"], key=lambda x: x.get("width", 0) * x.get("height", 0))
+            images.append(best.get("url"))
+
     if not images:
         raise Exception("Tidak ada gambar ditemukan")
- 
+
     downloaded = []
+    headers = {
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://www.tiktok.com/"  # Penting untuk TikTok!
+    }
     for i, img_url in enumerate(images[:10]):
         try:
-            resp = requests.get(img_url, timeout=15)
-            ext = "jpg"
+            resp = requests.get(img_url, headers=headers, timeout=15)
+            resp.raise_for_status()
+
+            # Deteksi ekstensi dari content-type
+            content_type = resp.headers.get("content-type", "")
+            if "png" in content_type:
+                ext = "png"
+            elif "webp" in content_type:
+                ext = "webp"
+            else:
+                ext = "jpg"
+
             filepath = os.path.join(output_dir, f"image_{i+1}.{ext}")
             with open(filepath, "wb") as f:
                 f.write(resp.content)
             downloaded.append(filepath)
         except Exception as e:
             logger.warning(f"Gagal download gambar {i+1}: {e}")
- 
+
     if not downloaded:
         raise Exception("Gagal download semua gambar")
- 
+
     return {
         "files": downloaded,
         "title": info.get("title", "Gambar"),
         "uploader": info.get("uploader", "Unknown"),
         "count": len(downloaded),
     }
+
  
 # === COMMANDS ===
 async def start(update, context):
