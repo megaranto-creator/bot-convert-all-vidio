@@ -43,9 +43,9 @@ def cookies_exist():
     return os.path.exists(COOKIES_FILE) and os.path.getsize(COOKIES_FILE) > 0
 
 def clean_text(text):
-    return re.sub(r'[*_`[\]]', '', text)[:200]
+    return re.sub(r'[*_`[\]]', '', str(text))[:200]
 
-# === CEK JENIS MEDIA TIKTOK ===
+# === MEDIA INFO ===
 async def get_media_info(url):
     ydl_opts = {
         "quiet": True,
@@ -63,19 +63,16 @@ async def get_media_info(url):
     return await loop.run_in_executor(None, _get_info)
 
 def is_slideshow(info):
-    """Deteksi apakah ini TikTok Photo Mode / Slideshow"""
     if info.get("extractor_key") != "TikTok":
         return False
-    # Cek entries (multiple images)
-    if "entries" in info and len(info["entries"]) > 1:
+    if "entries" in info and len(info.get("entries", [])) > 1:
         return True
-    # Cek jika ada format image tapi tidak ada video
     formats = info.get("formats", [])
     has_video = any(f.get("vcodec") != "none" for f in formats if f.get("vcodec"))
     has_image = any(f.get("ext") in ("jpg", "jpeg", "png", "webp") for f in formats)
     return has_image and not has_video
 
-# === DOWNLOAD VIDEO (Video Biasa) ===
+# === DOWNLOAD FUNCTIONS ===
 async def download_video(url, output_dir):
     ydl_opts = {
         "format": "best[height<=1080][ext=mp4]/best[height<=1080]/best[ext=mp4]/best",
@@ -96,9 +93,6 @@ async def download_video(url, output_dir):
     info = await loop.run_in_executor(None, _download)
 
     files = os.listdir(output_dir)
-    if not files:
-        raise Exception("File video tidak ditemukan")
-
     filepath = os.path.join(output_dir, files[0])
     file_size = os.path.getsize(filepath) / (1024 * 1024)
 
@@ -109,7 +103,6 @@ async def download_video(url, output_dir):
         "uploader": info.get("uploader", "Unknown"),
     }
 
-# === DOWNLOAD AUDIO ===
 async def download_audio(url, output_dir):
     ydl_opts = {
         "format": "bestaudio/best",
@@ -137,36 +130,28 @@ async def download_audio(url, output_dir):
     info = await loop.run_in_executor(None, _download)
 
     files = [f for f in os.listdir(output_dir) if f.endswith(('.mp3', '.m4a'))]
-    if not files:
-        raise Exception("File audio tidak ditemukan")
-
     filepath = os.path.join(output_dir, files[0])
     file_size = os.path.getsize(filepath) / (1024 * 1024)
 
     return {
         "filepath": filepath,
-        "title": info.get("title", "Audio TikTok"),
+        "title": info.get("title", "Audio"),
         "file_size_mb": round(file_size, 2),
         "uploader": info.get("uploader", "Unknown"),
     }
 
-# === DOWNLOAD GAMBAR (Slideshow / Photo Mode) ===
 async def download_images(url, output_dir):
     info = await get_media_info(url)
     images = []
 
-    # TikTok Slideshow biasanya punya "entries"
     if "entries" in info:
         for entry in info["entries"]:
-            formats = entry.get("formats", []) or [entry]
+            formats = entry.get("formats", [entry])
             img_formats = [f for f in formats if f.get("ext") in ("jpg", "jpeg", "png", "webp")]
             if img_formats:
                 best = max(img_formats, key=lambda x: x.get("width", 0) * x.get("height", 0))
                 images.append(best.get("url"))
-            elif entry.get("url"):
-                images.append(entry["url"])
     else:
-        # Single image atau fallback
         formats = info.get("formats", [])
         img_formats = [f for f in formats if f.get("ext") in ("jpg", "jpeg", "png", "webp")]
         if img_formats:
@@ -176,12 +161,12 @@ async def download_images(url, output_dir):
             images.append(info["url"])
 
     if not images:
-        raise Exception("Tidak ada gambar ditemukan di postingan ini")
+        raise Exception("Tidak ada gambar ditemukan")
 
     downloaded = []
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    headers = {"User-Agent": "Mozilla/5.0"}
 
-    for i, img_url in enumerate(images[:10]):  # maksimal 10 gambar
+    for i, img_url in enumerate(images[:10]):
         try:
             resp = requests.get(img_url, headers=headers, timeout=20)
             resp.raise_for_status()
@@ -194,7 +179,7 @@ async def download_images(url, output_dir):
             logger.warning(f"Gagal download gambar {i+1}: {e}")
 
     if not downloaded:
-        raise Exception("Gagal mendownload gambar")
+        raise Exception("Gagal mendownload semua gambar")
 
     return {
         "files": downloaded,
@@ -204,31 +189,31 @@ async def download_images(url, output_dir):
     }
 
 # === COMMANDS ===
-async def start(update, context):
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     status = "✅ Aktif" if cookies_exist() else "❌ Belum diset"
     text = (
         "👋 *Bot Media Downloader*\n\n"
         "📥 Platform yang didukung:\n"
-        "• 📸 Instagram\n"
-        "• 🎵 **TikTok** (Video + Slideshow Foto + Audio)\n"
-        "• 📘 Facebook\n"
-        "• 🎬 YouTube\n"
-        "• 🐦 Twitter / X\n\n"
-        "Cara pakai:\n"
-        "→ Kirim link TikTok biasa → **Video** atau **Gambar** otomatis\n"
-        "→ `/audio` + link → **Audio MP3** saja\n\n"
+        "• TikTok (Video + Slideshow Foto + Audio)\n"
+        "• Instagram, Facebook, YouTube, Twitter/X\n\n"
+        "Cara Pakai:\n"
+        "→ Kirim link → Video atau Gambar otomatis\n"
+        "→ `/audio link` → Audio MP3\n\n"
         f"🍪 Cookies: {status}"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
-async def audio_command(update, context):
+async def audio_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("⚠️ Gunakan: `/audio https://vm.tiktok.com/...`", parse_mode="Markdown")
+        await update.message.reply_text("⚠️ Gunakan:\n`/audio https://vm.tiktok.com/xxxx/`", parse_mode="Markdown")
         return
-    url = context.args[0].strip()
-    # ... (kode audio_command sama seperti sebelumnya, saya singkat)
 
-    msg = await update.message.reply_text("🎧 Mendownload audio TikTok...")
+    url = context.args[0].strip()
+    if not is_valid_url(url):
+        await update.message.reply_text("⚠️ Link tidak valid.")
+        return
+
+    msg = await update.message.reply_text("🎧 Mendownload audio...")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             result = await download_audio(url, tmpdir)
@@ -241,71 +226,118 @@ async def audio_command(update, context):
                 )
             await msg.edit_text("✅ Audio berhasil dikirim!")
     except Exception as e:
-        await msg.edit_text(f"❌ Gagal: {str(e)[:250]}")
+        await msg.edit_text(f"❌ Gagal download audio:\n{str(e)[:250]}")
 
-# === HANDLER UTAMA ===
-async def handle_url(update, context):
+async def set_cookies_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data["waiting_cookies"] = True
+    await update.message.reply_text(
+        "🍪 *Upload Cookies*\n\n"
+        "Kirim file `cookies.txt` sekarang.\n\n"
+        "Cara export:\n"
+        "1. Install ekstensi *Get cookies.txt LOCALLY* di Chrome\n"
+        "2. Login ke TikTok/Instagram di browser\n"
+        "3. Klik ekstensi → Export\n"
+        "4. Kirim file .txt ke bot ini",
+        parse_mode="Markdown"
+    )
+
+async def cookies_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if cookies_exist():
+        size = os.path.getsize(COOKIES_FILE)
+        await update.message.reply_text(f"🍪 Cookies aktif\n📦 Ukuran: {size} bytes")
+    else:
+        await update.message.reply_text("❌ Cookies belum diset.\nGunakan /setcookies")
+
+async def delete_cookies(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if cookies_exist():
+        os.remove(COOKIES_FILE)
+        await update.message.reply_text("🗑️ Cookies berhasil dihapus.")
+    else:
+        await update.message.reply_text("❌ Tidak ada cookies yang tersimpan.")
+
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.user_data.get("waiting_cookies"):
+        await update.message.reply_text("⚠️ Ketik /setcookies dulu sebelum upload file.")
+        return
+
+    doc = update.message.document
+    if not doc.file_name.endswith(".txt"):
+        await update.message.reply_text("❌ File harus berformat .txt")
+        return
+
+    msg = await update.message.reply_text("⏳ Menyimpan cookies...")
+    try:
+        file = await context.bot.get_file(doc.file_id)
+        os.makedirs(os.path.dirname(COOKIES_FILE), exist_ok=True)
+        await file.download_to_drive(COOKIES_FILE)
+        context.user_data["waiting_cookies"] = False
+        await msg.edit_text("✅ Cookies berhasil disimpan!\nSekarang konten private bisa didownload.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Gagal menyimpan cookies: {str(e)}")
+
+# === HANDLER URL ===
+async def handle_url(update: Update, context: ContextTypes.DEFAULT_TYPE):
     url = update.message.text.strip()
     if not is_valid_url(url):
-        await update.message.reply_text("⚠️ Link tidak valid.")
+        await update.message.reply_text("⚠️ Bukan link valid.")
         return
 
     platform = detect_platform(url)
-    msg = await update.message.reply_text(f"🔄 Mendeteksi & mendownload dari {platform.capitalize()}...")
+    msg = await update.message.reply_text(f"🔄 Memproses link {platform.capitalize()}...")
 
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             info = await get_media_info(url)
 
+            # TikTok Slideshow
             if platform == "tiktok" and is_slideshow(info):
-                await msg.edit_text("🖼️ Mendownload slideshow gambar TikTok...")
+                await msg.edit_text("🖼️ Mendownload slideshow gambar...")
                 result = await download_images(url, tmpdir)
-                safe_title = clean_text(result["title"])
-                caption = f"🖼️ {safe_title}\n👤 {clean_text(result['uploader'])}"
-
+                caption = f"🖼️ {clean_text(result['title'])}\n👤 {clean_text(result['uploader'])}"
+                
                 if len(result["files"]) == 1:
                     with open(result["files"][0], "rb") as f:
                         await context.bot.send_photo(chat_id=update.message.chat_id, photo=f, caption=caption)
                 else:
-                    media = [InputMediaPhoto(media=open(fp, "rb").read(), caption=caption if i == 0 else None) 
-                             for i, fp in enumerate(result["files"])]
+                    media = []
+                    for i, fp in enumerate(result["files"]):
+                        with open(fp, "rb") as f:
+                            media.append(InputMediaPhoto(media=f.read(), caption=caption if i == 0 else None))
                     await context.bot.send_media_group(chat_id=update.message.chat_id, media=media)
                 await msg.edit_text(f"✅ {result['count']} gambar slideshow dikirim!")
 
             else:
-                # Default: coba video dulu
+                # Video biasa
                 await msg.edit_text("🎥 Mendownload video...")
-                try:
-                    video_info = await download_video(url, tmpdir)
-                    caption = f"📹 {clean_text(video_info['title'])}\n👤 {clean_text(video_info['uploader'])}\n📦 {video_info['file_size_mb']} MB"
-                    with open(video_info["filepath"], "rb") as f:
-                        await context.bot.send_video(
-                            chat_id=update.message.chat_id,
-                            video=f,
-                            caption=caption,
-                            supports_streaming=True,
-                        )
-                    await msg.edit_text("✅ Video berhasil dikirim!")
-                except Exception as ve:
-                    # Fallback ke gambar jika gagal sebagai video
-                    await msg.edit_text("🖼️ Mencoba download sebagai gambar...")
-                    result = await download_images(url, tmpdir)
-                    # ... (kirim gambar sama seperti di atas)
-                    await msg.edit_text(f"✅ {result['count']} gambar dikirim!")
+                video_info = await download_video(url, tmpdir)
+                caption = f"📹 {clean_text(video_info['title'])}\n👤 {clean_text(video_info['uploader'])}\n📦 {video_info['file_size_mb']} MB"
+                with open(video_info["filepath"], "rb") as f:
+                    await context.bot.send_video(
+                        chat_id=update.message.chat_id,
+                        video=f,
+                        caption=caption,
+                        supports_streaming=True,
+                    )
+                await msg.edit_text("✅ Video berhasil dikirim!")
 
     except Exception as e:
-        logger.error(f"Error handle_url: {e}", exc_info=True)
-        await msg.edit_text(f"❌ Gagal memproses:\n{str(e)[:200]}")
+        logger.error(f"Error: {e}", exc_info=True)
+        await msg.edit_text(f"❌ Gagal memproses link:\n{str(e)[:250]}")
 
-# === MAIN (sama seperti sebelumnya) ===
+# === MAIN ===
 def main():
     app = Application.builder().token(BOT_TOKEN).build()
+
+    # Semua handler
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("audio", audio_command))
-    # tambahkan handler cookies seperti sebelumnya...
-
+    app.add_handler(CommandHandler("setcookies", set_cookies_command))
+    app.add_handler(CommandHandler("cookiesstatus", cookies_status))
+    app.add_handler(CommandHandler("deletecookies", delete_cookies))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_url))
-    logger.info("Bot Media Downloader v2 (TikTok Video + Slideshow + Audio) berjalan...")
+
+    logger.info("✅ Bot Media Downloader berjalan dengan fitur TikTok lengkap!")
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
