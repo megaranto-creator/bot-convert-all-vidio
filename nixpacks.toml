@@ -1,6 +1,5 @@
 [phases.setup]
 nixPkgs = ["...", "ffmpeg"]
-aptPkgs = ["...", "ffmpeg"]
 
 [phases.install]
 cmds = [
